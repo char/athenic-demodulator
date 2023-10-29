@@ -1,0 +1,25 @@
+[package]
+name = "athenic_demodulator"
+version = "0.1.0"
+edition = "2021"
+authors = ["charlotte athena som <charlotte@som.codes>"]
+homepage = "https://som.codes/plugins/"
+description = "additive audio-as-data demodulator"
+
+[workspace]
+members = ["xtask"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs"] }
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"
