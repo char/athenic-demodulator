@@ -9,8 +9,10 @@ const BLOCK_SIZE: usize = 1050; // 1050 samples = 42Hz wave period at 44.1k
 const NUM_HARMONICS: usize = 500;
 
 struct AdditiveEngine {
-    working_harmonic_amplitudes: [f32; 512],
-    harmonic_amplitudes: [f32; 512],
+    working_harmonic_amplitudes_l: [f32; 512],
+    working_harmonic_amplitudes_r: [f32; 512],
+    harmonic_amplitudes_l: [f32; 512],
+    harmonic_amplitudes_r: [f32; 512],
     harmonic_phases: [f32; 512],
     block_progress: usize,
     prev_harmonic: usize,
@@ -20,8 +22,10 @@ struct AdditiveEngine {
 impl Default for AdditiveEngine {
     fn default() -> Self {
         Self {
-            working_harmonic_amplitudes: [0.0; 512],
-            harmonic_amplitudes: [0.0; 512],
+            working_harmonic_amplitudes_l: [0.0; 512],
+            working_harmonic_amplitudes_r: [0.0; 512],
+            harmonic_amplitudes_l: [0.0; 512],
+            harmonic_amplitudes_r: [0.0; 512],
             harmonic_phases: [0.0; 512],
             block_progress: 0,
             prev_harmonic: 0,
@@ -47,6 +51,8 @@ struct AthenicDemodulatorParams {
     floor: FloatParam,
     #[id = "ceiling"]
     ceiling: FloatParam,
+    #[id = "bias"]
+    bias: FloatParam,
     #[id = "attack_ms"]
     attack_ms: FloatParam,
     #[id = "release_ms"]
@@ -76,20 +82,31 @@ impl Default for AthenicDemodulatorParams {
         Self {
             floor: FloatParam::new(
                 "floor",
-                -1.0,
+                -2.0,
                 FloatRange::Linear {
-                    min: -1.0,
-                    max: 1.0,
+                    min: -2.0,
+                    max: 2.0,
                 },
-            ),
+            )
+            .with_step_size(1.0 / 32.0),
             ceiling: FloatParam::new(
                 "ceiling",
-                1.0,
+                2.0,
                 FloatRange::Linear {
-                    min: -1.0,
-                    max: 1.0,
+                    min: -2.0,
+                    max: 2.0,
                 },
-            ),
+            )
+            .with_step_size(1.0 / 32.0),
+            bias: FloatParam::new(
+                "bias",
+                0.0,
+                FloatRange::Linear {
+                    min: -2.0,
+                    max: 2.0,
+                },
+            )
+            .with_step_size(1.0 / 64.0),
 
             attack_ms: FloatParam::new(
                 "attack",
@@ -135,7 +152,7 @@ impl Plugin for AthenicDemodulator {
         names: PortNames::const_default(),
     }];
 
-    const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
+    const MIDI_INPUT: MidiConfig = MidiConfig::MidiCCs;
     const MIDI_OUTPUT: MidiConfig = MidiConfig::None;
 
     const SAMPLE_ACCURATE_AUTOMATION: bool = true;
@@ -192,12 +209,14 @@ impl Plugin for AthenicDemodulator {
                                     self.envelope.reset();
 
                                     self.engine.block_progress = 0;
+                                    self.engine.prev_harmonic = 0;
+
+                                    // TODO: other phase modes
                                     for (i, phi) in
                                         self.engine.harmonic_phases.iter_mut().enumerate()
                                     {
                                         *phi = 512 as f32 / (i + 1) as f32;
                                     }
-                                    self.engine.prev_harmonic = 0;
                                 }
 
                                 self.notes_on += 1;
@@ -230,34 +249,52 @@ impl Plugin for AthenicDemodulator {
             }
 
             if self.engine.block_progress < BLOCK_SIZE {
-                let mut amplitude = buf[0][sample_idx];
-                if amplitude > self.params.ceiling.value() {
-                    amplitude = 0.0;
-                }
-                if amplitude < self.params.floor.value() {
-                    amplitude = 0.0;
-                }
-
                 let next_harmonic: usize = f32::floor(f32::exp(
                     f32::ln(NUM_HARMONICS as f32) * (self.engine.block_progress as f32)
                         / BLOCK_SIZE as f32,
                 )) as usize
                     + 1;
 
+                let mut amplitude_l = buf[0][sample_idx];
+                amplitude_l += self.params.bias.value();
+                if amplitude_l > self.params.ceiling.value() {
+                    amplitude_l = 0.0;
+                }
+                if amplitude_l < self.params.floor.value() {
+                    amplitude_l = 0.0;
+                }
+
+                let mut amplitude_r = buf[1][sample_idx];
+                amplitude_r += self.params.bias.value();
+                if amplitude_r > self.params.ceiling.value() {
+                    amplitude_r = 0.0;
+                }
+                if amplitude_r < self.params.floor.value() {
+                    amplitude_r = 0.0;
+                }
+
                 for harmonic in self.engine.prev_harmonic + 1..=next_harmonic {
                     if harmonic >= 512 {
                         continue;
                     }
                     if harmonic != self.engine.prev_harmonic {
-                        self.engine.working_harmonic_amplitudes[harmonic - 1] = amplitude;
+                        self.engine.working_harmonic_amplitudes_l[harmonic - 1] =
+                            amplitude_l * amplitude_l;
+                        self.engine.working_harmonic_amplitudes_r[harmonic - 1] =
+                            amplitude_r * amplitude_r;
                         self.engine.harmonic_sample_count = 1;
                     } else {
                         // moving average
                         self.engine.harmonic_sample_count += 1;
-                        self.engine.working_harmonic_amplitudes[harmonic - 1] =
-                            (self.engine.working_harmonic_amplitudes[harmonic - 1]
+                        self.engine.working_harmonic_amplitudes_l[harmonic - 1] =
+                            (self.engine.working_harmonic_amplitudes_l[harmonic - 1]
                                 * (self.engine.harmonic_sample_count as f32 - 1.0)
-                                + amplitude)
+                                + amplitude_l * amplitude_l)
+                                / (self.engine.harmonic_sample_count as f32);
+                        self.engine.working_harmonic_amplitudes_r[harmonic - 1] =
+                            (self.engine.working_harmonic_amplitudes_r[harmonic - 1]
+                                * (self.engine.harmonic_sample_count as f32 - 1.0)
+                                + amplitude_r * amplitude_r)
                                 / (self.engine.harmonic_sample_count as f32);
                     }
 
@@ -273,8 +310,11 @@ impl Plugin for AthenicDemodulator {
             if self.engine.block_progress >= BLOCK_SIZE {
                 self.engine.block_progress = 0;
                 self.engine
-                    .harmonic_amplitudes
-                    .copy_from_slice(&self.engine.working_harmonic_amplitudes);
+                    .harmonic_amplitudes_l
+                    .copy_from_slice(&self.engine.working_harmonic_amplitudes_l);
+                self.engine
+                    .harmonic_amplitudes_r
+                    .copy_from_slice(&self.engine.working_harmonic_amplitudes_r);
                 self.engine.prev_harmonic = 0;
             }
 
@@ -288,16 +328,21 @@ impl Plugin for AthenicDemodulator {
                     let frequency = fundamental * (1.0 + harmonic_idx as f32);
                     let step = frequency / self.sample_rate;
 
-                    let gain = self.engine.harmonic_amplitudes[harmonic_idx];
+                    let gain_l = self.engine.harmonic_amplitudes_l[harmonic_idx]
+                        * self.envelope_values[sample_idx];
+                    let gain_r = self.engine.harmonic_amplitudes_r[harmonic_idx]
+                        * self.envelope_values[sample_idx];
                     let phase = self.engine.harmonic_phases[harmonic_idx];
 
                     self.engine.harmonic_phases[harmonic_idx] = phase + step;
 
                     if frequency < self.sample_rate / 2.0 {
-                        let sample_value = f32::sin(phase * std::f32::consts::TAU) * gain;
+                        let (s, c) = f32::sin_cos(phase * std::f32::consts::TAU);
+                        let sample_l = (s + c) * gain_l;
+                        let sample_r = (s - c) * gain_r;
 
-                        buf[0][sample_idx] += sample_value;
-                        buf[1][sample_idx] += sample_value;
+                        buf[0][sample_idx] += sample_l;
+                        buf[1][sample_idx] += sample_r;
                     }
                 }
             }
