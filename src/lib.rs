@@ -82,7 +82,7 @@ impl Default for AthenicDemodulatorParams {
         Self {
             floor: FloatParam::new(
                 "floor",
-                -2.0,
+                0.0,
                 FloatRange::Linear {
                     min: -2.0,
                     max: 2.0,
@@ -279,9 +279,9 @@ impl Plugin for AthenicDemodulator {
                     }
                     if harmonic != self.engine.prev_harmonic {
                         self.engine.working_harmonic_amplitudes_l[harmonic - 1] =
-                            amplitude_l * amplitude_l;
+                            amplitude_l * amplitude_l * amplitude_l.signum();
                         self.engine.working_harmonic_amplitudes_r[harmonic - 1] =
-                            amplitude_r * amplitude_r;
+                            amplitude_r * amplitude_r * amplitude_r.signum();
                         self.engine.harmonic_sample_count = 1;
                     } else {
                         // moving average
@@ -289,12 +289,12 @@ impl Plugin for AthenicDemodulator {
                         self.engine.working_harmonic_amplitudes_l[harmonic - 1] =
                             (self.engine.working_harmonic_amplitudes_l[harmonic - 1]
                                 * (self.engine.harmonic_sample_count as f32 - 1.0)
-                                + amplitude_l * amplitude_l)
+                                + amplitude_l * amplitude_l * amplitude_l.signum())
                                 / (self.engine.harmonic_sample_count as f32);
                         self.engine.working_harmonic_amplitudes_r[harmonic - 1] =
                             (self.engine.working_harmonic_amplitudes_r[harmonic - 1]
                                 * (self.engine.harmonic_sample_count as f32 - 1.0)
-                                + amplitude_r * amplitude_r)
+                                + amplitude_r * amplitude_r * amplitude_r.signum())
                                 / (self.engine.harmonic_sample_count as f32);
                     }
 
