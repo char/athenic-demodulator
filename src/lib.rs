@@ -6,7 +6,6 @@ mod envelope;
 use crate::envelope::AREnvelope;
 
 const BLOCK_SIZE: usize = 1050; // 1050 samples = 42Hz wave period at 44.1k
-const NUM_HARMONICS: usize = 500;
 
 struct AdditiveEngine {
     working_harmonic_amplitudes_l: [f32; 512],
@@ -57,6 +56,8 @@ struct AthenicDemodulatorParams {
     attack_ms: FloatParam,
     #[id = "release_ms"]
     release_ms: FloatParam,
+    #[id = "partial_count"]
+    partial_count: IntParam,
 }
 
 impl Default for AthenicDemodulator {
@@ -130,6 +131,12 @@ impl Default for AthenicDemodulatorParams {
             )
             .with_unit(" ms")
             .with_step_size(0.001),
+
+            partial_count: IntParam::new(
+                "partial count",
+                500,
+                IntRange::Linear { min: 1, max: 512 },
+            ),
         }
     }
 }
@@ -198,6 +205,8 @@ impl Plugin for AthenicDemodulator {
         self.envelope
             .next_block(&mut self.envelope_values, num_samples);
 
+        let num_partials = self.params.partial_count.value() as usize;
+
         for sample_idx in 0..num_samples {
             'events: loop {
                 match note_event {
@@ -250,7 +259,7 @@ impl Plugin for AthenicDemodulator {
 
             if self.engine.block_progress < BLOCK_SIZE {
                 let next_harmonic: usize = f32::floor(f32::exp(
-                    f32::ln(NUM_HARMONICS as f32) * (self.engine.block_progress as f32)
+                    f32::ln(num_partials as f32) * (self.engine.block_progress as f32)
                         / BLOCK_SIZE as f32,
                 )) as usize
                     + 1;
@@ -324,7 +333,7 @@ impl Plugin for AthenicDemodulator {
                         + (self.bend_amount.clamp(0.0, 1.0) * 2.0 - 1.0) * 12.0, // 12.0 = BEND_EXTENTS
                 );
 
-                for harmonic_idx in 0..NUM_HARMONICS {
+                for harmonic_idx in 0..num_partials {
                     let frequency = fundamental * (1.0 + harmonic_idx as f32);
                     let step = frequency / self.sample_rate;
 
