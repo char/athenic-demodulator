@@ -103,8 +103,8 @@ impl Default for AthenicDemodulatorParams {
                 "bias",
                 0.0,
                 FloatRange::Linear {
-                    min: -2.0,
-                    max: 2.0,
+                    min: -1.0,
+                    max: 1.0,
                 },
             )
             .with_step_size(1.0 / 64.0),
