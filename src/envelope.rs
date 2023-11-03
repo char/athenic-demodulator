@@ -24,10 +24,6 @@ impl AREnvelope {
         self.releasing = false;
     }
 
-    pub fn current(&self) -> f32 {
-        self.state
-    }
-
     pub fn next_block(&mut self, block_values: &mut [f32], block_len: usize) {
         nih_debug_assert!(block_values.len() >= block_len);
         for value in block_values.iter_mut().take(block_len) {

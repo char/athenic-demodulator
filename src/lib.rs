@@ -58,6 +58,8 @@ struct AthenicDemodulatorParams {
     release_ms: FloatParam,
     #[id = "partial_count"]
     partial_count: IntParam,
+    #[id = "partial_offset"]
+    partial_offset: IntParam,
 }
 
 impl Default for AthenicDemodulator {
@@ -137,6 +139,11 @@ impl Default for AthenicDemodulatorParams {
                 500,
                 IntRange::Linear { min: 1, max: 512 },
             ),
+            partial_offset: IntParam::new(
+                "partial offset",
+                0,
+                IntRange::Linear { min: 0, max: 512 },
+            ),
         }
     }
 }
@@ -206,6 +213,7 @@ impl Plugin for AthenicDemodulator {
             .next_block(&mut self.envelope_values, num_samples);
 
         let num_partials = self.params.partial_count.value() as usize;
+        let partial_offset = self.params.partial_offset.value() as usize;
 
         for sample_idx in 0..num_samples {
             'events: loop {
@@ -224,7 +232,7 @@ impl Plugin for AthenicDemodulator {
                                     for (i, phi) in
                                         self.engine.harmonic_phases.iter_mut().enumerate()
                                     {
-                                        *phi = 512 as f32 / (i + 1) as f32;
+                                        *phi = 512.0 / (i + 1) as f32;
                                     }
                                 }
 
@@ -262,7 +270,8 @@ impl Plugin for AthenicDemodulator {
                     f32::ln(num_partials as f32) * (self.engine.block_progress as f32)
                         / BLOCK_SIZE as f32,
                 )) as usize
-                    + 1;
+                    + 1
+                    + partial_offset;
 
                 let mut amplitude_l = buf[0][sample_idx];
                 amplitude_l += self.params.bias.value();
@@ -284,7 +293,7 @@ impl Plugin for AthenicDemodulator {
 
                 for harmonic in self.engine.prev_harmonic + 1..=next_harmonic {
                     if harmonic >= 512 {
-                        continue;
+                        break;
                     }
                     if harmonic != self.engine.prev_harmonic {
                         self.engine.working_harmonic_amplitudes_l[harmonic - 1] =
