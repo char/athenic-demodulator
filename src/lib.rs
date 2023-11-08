@@ -8,26 +8,32 @@ use crate::envelope::AREnvelope;
 const BLOCK_SIZE: usize = 1050; // 1050 samples = 42Hz wave period at 44.1k
 
 struct AdditiveEngine {
+    prev_working_harmonic: usize,
     working_harmonic_amplitudes_l: [f32; 512],
     working_harmonic_amplitudes_r: [f32; 512],
     harmonic_amplitudes_l: [f32; 512],
     harmonic_amplitudes_r: [f32; 512],
+    prev_harmonic_amplitudes_l: [f32; 512],
+    prev_harmonic_amplitudes_r: [f32; 512],
     harmonic_phases: [f32; 512],
-    block_progress: usize,
-    prev_harmonic: usize,
+    working_progress: usize,
+    playback_progress: usize,
     harmonic_sample_count: usize,
 }
 
 impl Default for AdditiveEngine {
     fn default() -> Self {
         Self {
+            prev_working_harmonic: 1,
             working_harmonic_amplitudes_l: [0.0; 512],
             working_harmonic_amplitudes_r: [0.0; 512],
             harmonic_amplitudes_l: [0.0; 512],
             harmonic_amplitudes_r: [0.0; 512],
+            prev_harmonic_amplitudes_l: [0.0; 512],
+            prev_harmonic_amplitudes_r: [0.0; 512],
             harmonic_phases: [0.0; 512],
-            block_progress: 0,
-            prev_harmonic: 0,
+            working_progress: 0,
+            playback_progress: 0,
             harmonic_sample_count: 0,
         }
     }
@@ -73,7 +79,7 @@ impl Default for AthenicDemodulator {
             sample_rate: 44100.0,
             notes_on: 0,
             current_midi_note: 0,
-            bend_amount: 0.0,
+            bend_amount: 0.5,
             envelope: AREnvelope::default(),
             envelope_values,
         }
@@ -218,23 +224,27 @@ impl Plugin for AthenicDemodulator {
         for sample_idx in 0..num_samples {
             'events: loop {
                 match note_event {
+                    Some(event) if (event.timing() as usize) < sample_idx => {
+                        // if the event already passed, try the next one:
+                        note_event = context.next_event();
+                    }
                     Some(event) if (event.timing() as usize) == sample_idx => {
                         // if the event is for the current sample, we should process it:
                         match event {
                             NoteEvent::NoteOn { note, .. } => {
-                                if self.notes_on == 0 {
-                                    self.envelope.reset();
+                                // if self.notes_on == 0 {
+                                self.envelope.reset();
 
-                                    self.engine.block_progress = 0;
-                                    self.engine.prev_harmonic = 0;
+                                self.engine.working_progress = 0;
+                                self.engine.prev_working_harmonic = 1;
+                                self.engine.harmonic_amplitudes_l.fill(0.0);
+                                self.engine.harmonic_amplitudes_r.fill(0.0);
 
-                                    // TODO: other phase modes
-                                    for (i, phi) in
-                                        self.engine.harmonic_phases.iter_mut().enumerate()
-                                    {
-                                        *phi = 512.0 / (i + 1) as f32;
-                                    }
+                                // TODO: other phase modes
+                                for (i, phi) in self.engine.harmonic_phases.iter_mut().enumerate() {
+                                    *phi = 512.0 / (i + 1) as f32;
                                 }
+                                // }
 
                                 self.notes_on += 1;
                                 self.current_midi_note = note;
@@ -254,10 +264,6 @@ impl Plugin for AthenicDemodulator {
                         // then get the next one so we don't loop forever
                         note_event = context.next_event();
                     }
-                    Some(event) if (event.timing() as usize) < sample_idx => {
-                        // if the event already passed, try the next one:
-                        note_event = context.next_event();
-                    }
                     _ => {
                         // if the event is after the current sample, just hold on to it:
                         break 'events;
@@ -265,12 +271,11 @@ impl Plugin for AthenicDemodulator {
                 }
             }
 
-            if self.engine.block_progress < BLOCK_SIZE {
+            if self.engine.working_progress < BLOCK_SIZE {
                 let next_harmonic: usize = f32::floor(f32::exp(
-                    f32::ln(num_partials as f32) * (self.engine.block_progress as f32)
+                    f32::ln(num_partials as f32) * (self.engine.working_progress as f32)
                         / BLOCK_SIZE as f32,
                 )) as usize
-                    + 1
                     + partial_offset;
 
                 let mut amplitude_l = buf[0][sample_idx];
@@ -291,11 +296,11 @@ impl Plugin for AthenicDemodulator {
                     amplitude_r = 0.0;
                 }
 
-                for harmonic in self.engine.prev_harmonic + 1..=next_harmonic {
+                for harmonic in self.engine.prev_working_harmonic..=next_harmonic {
                     if harmonic >= 512 {
                         break;
                     }
-                    if harmonic != self.engine.prev_harmonic {
+                    if harmonic != self.engine.prev_working_harmonic {
                         self.engine.working_harmonic_amplitudes_l[harmonic - 1] =
                             amplitude_l * amplitude_l * amplitude_l.signum();
                         self.engine.working_harmonic_amplitudes_r[harmonic - 1] =
@@ -316,25 +321,37 @@ impl Plugin for AthenicDemodulator {
                                 / (self.engine.harmonic_sample_count as f32);
                     }
 
-                    self.engine.prev_harmonic = harmonic;
+                    self.engine.prev_working_harmonic = harmonic;
                 }
             }
 
-            self.engine.block_progress += 1;
+            self.engine.working_progress += 1;
 
-            buf[0][sample_idx] = 0.0;
-            buf[1][sample_idx] = 0.0;
+            if self.engine.working_progress >= BLOCK_SIZE {
+                self.engine.working_progress = 0;
 
-            if self.engine.block_progress >= BLOCK_SIZE {
-                self.engine.block_progress = 0;
+                self.engine
+                    .prev_harmonic_amplitudes_l
+                    .copy_from_slice(&self.engine.harmonic_amplitudes_l);
+                self.engine
+                    .prev_harmonic_amplitudes_r
+                    .copy_from_slice(&self.engine.harmonic_amplitudes_r);
+
                 self.engine
                     .harmonic_amplitudes_l
                     .copy_from_slice(&self.engine.working_harmonic_amplitudes_l);
                 self.engine
                     .harmonic_amplitudes_r
                     .copy_from_slice(&self.engine.working_harmonic_amplitudes_r);
-                self.engine.prev_harmonic = 0;
+
+                self.engine.prev_working_harmonic = 1;
             }
+
+            buf[0][sample_idx] = 0.0;
+            buf[1][sample_idx] = 0.0;
+
+            self.engine.playback_progress += 1;
+            let playback_t = self.engine.playback_progress as f32 / BLOCK_SIZE as f32;
 
             if self.notes_on > 0 || self.envelope.is_releasing() {
                 let fundamental = util::f32_midi_note_to_freq(
@@ -346,23 +363,33 @@ impl Plugin for AthenicDemodulator {
                     let frequency = fundamental * (1.0 + harmonic_idx as f32);
                     let step = frequency / self.sample_rate;
 
-                    let gain_l = self.engine.harmonic_amplitudes_l[harmonic_idx]
-                        * self.envelope_values[sample_idx];
-                    let gain_r = self.engine.harmonic_amplitudes_r[harmonic_idx]
-                        * self.envelope_values[sample_idx];
                     let phase = self.engine.harmonic_phases[harmonic_idx];
 
                     self.engine.harmonic_phases[harmonic_idx] = phase + step;
 
                     if frequency < self.sample_rate / 2.0 {
                         let (s, c) = f32::sin_cos(phase * std::f32::consts::TAU);
-                        let sample_l = (s + c) * gain_l;
-                        let sample_r = (s - c) * gain_r;
 
-                        buf[0][sample_idx] += sample_l;
-                        buf[1][sample_idx] += sample_r;
+                        // lerp gain over playback block
+                        let gain_l = self.engine.prev_harmonic_amplitudes_l[harmonic_idx]
+                            * (1.0 - playback_t)
+                            + self.engine.harmonic_amplitudes_l[harmonic_idx] * playback_t;
+                        let gain_r = self.engine.prev_harmonic_amplitudes_r[harmonic_idx]
+                            * (1.0 - playback_t)
+                            + self.engine.harmonic_amplitudes_r[harmonic_idx] * playback_t;
+
+                        let width = 0.0; // TODO
+                        let sample_l = (s + c * width) * gain_l;
+                        let sample_r = (s - c * width) * gain_r;
+
+                        buf[0][sample_idx] += sample_l * self.envelope_values[sample_idx] * 0.5;
+                        buf[1][sample_idx] += sample_r * self.envelope_values[sample_idx] * 0.5;
                     }
                 }
+            }
+
+            if self.engine.playback_progress >= BLOCK_SIZE {
+                self.engine.playback_progress = 0;
             }
         }
 
