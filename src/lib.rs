@@ -371,16 +371,18 @@ impl Plugin for AthenicDemodulator {
                         let (s, c) = f32::sin_cos(phase * std::f32::consts::TAU);
 
                         // lerp gain over playback block
-                        let gain_l = self.engine.prev_harmonic_amplitudes_l[harmonic_idx]
+                        let amp_l = self.engine.prev_harmonic_amplitudes_l[harmonic_idx]
                             * (1.0 - playback_t)
                             + self.engine.harmonic_amplitudes_l[harmonic_idx] * playback_t;
-                        let gain_r = self.engine.prev_harmonic_amplitudes_r[harmonic_idx]
+                        let amp_r = self.engine.prev_harmonic_amplitudes_r[harmonic_idx]
                             * (1.0 - playback_t)
                             + self.engine.harmonic_amplitudes_r[harmonic_idx] * playback_t;
 
+                        let saw_gain = 1.0 / (harmonic_idx as f32 + 1.0);
+
                         let width = 0.0; // TODO
-                        let sample_l = (s + c * width) * gain_l;
-                        let sample_r = (s - c * width) * gain_r;
+                        let sample_l = (s + c * width) * amp_l * saw_gain.sqrt() * 2.0;
+                        let sample_r = (s - c * width) * amp_r * saw_gain.sqrt() * 2.0;
 
                         buf[0][sample_idx] += sample_l * self.envelope_values[sample_idx] * 0.5;
                         buf[1][sample_idx] += sample_r * self.envelope_values[sample_idx] * 0.5;
