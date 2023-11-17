@@ -11,14 +11,17 @@ struct AdditiveEngine {
     prev_working_harmonic: usize,
     working_harmonic_amplitudes_l: [f32; 512],
     working_harmonic_amplitudes_r: [f32; 512],
-    harmonic_amplitudes_l: [f32; 512],
-    harmonic_amplitudes_r: [f32; 512],
-    prev_harmonic_amplitudes_l: [f32; 512],
-    prev_harmonic_amplitudes_r: [f32; 512],
+    block_harmonic_amplitudes_l: [f32; 512],
+    block_harmonic_amplitudes_r: [f32; 512],
+    prev_block_harmonic_amplitudes_l: [f32; 512],
+    prev_block_harmonic_amplitudes_r: [f32; 512],
+    last_sample_harmonic_amplitude_l: [f32; 512],
+    last_sample_harmonic_amplitude_r: [f32; 512],
     harmonic_phases: [f32; 512],
     working_progress: usize,
     playback_progress: usize,
     harmonic_sample_count: usize,
+    was_emitting: bool,
 }
 
 impl Default for AdditiveEngine {
@@ -27,14 +30,17 @@ impl Default for AdditiveEngine {
             prev_working_harmonic: 1,
             working_harmonic_amplitudes_l: [0.0; 512],
             working_harmonic_amplitudes_r: [0.0; 512],
-            harmonic_amplitudes_l: [0.0; 512],
-            harmonic_amplitudes_r: [0.0; 512],
-            prev_harmonic_amplitudes_l: [0.0; 512],
-            prev_harmonic_amplitudes_r: [0.0; 512],
+            block_harmonic_amplitudes_l: [0.0; 512],
+            block_harmonic_amplitudes_r: [0.0; 512],
+            prev_block_harmonic_amplitudes_l: [0.0; 512],
+            prev_block_harmonic_amplitudes_r: [0.0; 512],
+            last_sample_harmonic_amplitude_l: [0.0; 512],
+            last_sample_harmonic_amplitude_r: [0.0; 512],
             harmonic_phases: [0.0; 512],
             working_progress: 0,
             playback_progress: 0,
             harmonic_sample_count: 0,
+            was_emitting: false,
         }
     }
 }
@@ -232,19 +238,15 @@ impl Plugin for AthenicDemodulator {
                         // if the event is for the current sample, we should process it:
                         match event {
                             NoteEvent::NoteOn { note, .. } => {
-                                // if self.notes_on == 0 {
-                                self.envelope.reset();
+                                // TODO: polyphony???
 
+                                self.envelope.reset();
                                 self.engine.working_progress = 0;
                                 self.engine.prev_working_harmonic = 1;
-                                self.engine.harmonic_amplitudes_l.fill(0.0);
-                                self.engine.harmonic_amplitudes_r.fill(0.0);
 
-                                // TODO: other phase modes
                                 for (i, phi) in self.engine.harmonic_phases.iter_mut().enumerate() {
                                     *phi = 512.0 / (i + 1) as f32;
                                 }
-                                // }
 
                                 self.notes_on += 1;
                                 self.current_midi_note = note;
@@ -272,6 +274,7 @@ impl Plugin for AthenicDemodulator {
             }
 
             if self.engine.working_progress < BLOCK_SIZE {
+                // TODO: improve distribution
                 let next_harmonic: usize = f32::floor(f32::exp(
                     f32::ln(num_partials as f32) * (self.engine.working_progress as f32)
                         / BLOCK_SIZE as f32,
@@ -331,17 +334,17 @@ impl Plugin for AthenicDemodulator {
                 self.engine.working_progress = 0;
 
                 self.engine
-                    .prev_harmonic_amplitudes_l
-                    .copy_from_slice(&self.engine.harmonic_amplitudes_l);
+                    .prev_block_harmonic_amplitudes_l
+                    .copy_from_slice(&self.engine.block_harmonic_amplitudes_l);
                 self.engine
-                    .prev_harmonic_amplitudes_r
-                    .copy_from_slice(&self.engine.harmonic_amplitudes_r);
+                    .prev_block_harmonic_amplitudes_r
+                    .copy_from_slice(&self.engine.block_harmonic_amplitudes_r);
 
                 self.engine
-                    .harmonic_amplitudes_l
+                    .block_harmonic_amplitudes_l
                     .copy_from_slice(&self.engine.working_harmonic_amplitudes_l);
                 self.engine
-                    .harmonic_amplitudes_r
+                    .block_harmonic_amplitudes_r
                     .copy_from_slice(&self.engine.working_harmonic_amplitudes_r);
 
                 self.engine.prev_working_harmonic = 1;
@@ -354,6 +357,8 @@ impl Plugin for AthenicDemodulator {
             let playback_t = self.engine.playback_progress as f32 / BLOCK_SIZE as f32;
 
             if self.notes_on > 0 || self.envelope.is_releasing() {
+                self.engine.was_emitting = true;
+
                 let fundamental = util::f32_midi_note_to_freq(
                     self.current_midi_note as f32
                         + (self.bend_amount.clamp(0.0, 1.0) * 2.0 - 1.0) * 12.0, // 12.0 = BEND_EXTENTS
@@ -371,12 +376,23 @@ impl Plugin for AthenicDemodulator {
                         let (s, c) = f32::sin_cos(phase * std::f32::consts::TAU);
 
                         // lerp gain over playback block
-                        let amp_l = self.engine.prev_harmonic_amplitudes_l[harmonic_idx]
+                        let amp_l = self.engine.prev_block_harmonic_amplitudes_l[harmonic_idx]
                             * (1.0 - playback_t)
-                            + self.engine.harmonic_amplitudes_l[harmonic_idx] * playback_t;
-                        let amp_r = self.engine.prev_harmonic_amplitudes_r[harmonic_idx]
+                            + self.engine.block_harmonic_amplitudes_l[harmonic_idx] * playback_t;
+                        let amp_r = self.engine.prev_block_harmonic_amplitudes_r[harmonic_idx]
                             * (1.0 - playback_t)
-                            + self.engine.harmonic_amplitudes_r[harmonic_idx] * playback_t;
+                            + self.engine.block_harmonic_amplitudes_r[harmonic_idx] * playback_t;
+
+                        const SLEW_THRESHOLD: f32 = 1.0 / 3528.0;
+                        let last_amp_l = self.engine.last_sample_harmonic_amplitude_l[harmonic_idx];
+                        let last_amp_r = self.engine.last_sample_harmonic_amplitude_r[harmonic_idx];
+                        let delta_amp_l = amp_l - last_amp_l;
+                        let delta_amp_r = amp_r - last_amp_r;
+                        let amp_l = last_amp_l + delta_amp_l.clamp(-SLEW_THRESHOLD, SLEW_THRESHOLD);
+                        let amp_r = last_amp_r + delta_amp_r.clamp(-SLEW_THRESHOLD, SLEW_THRESHOLD);
+
+                        self.engine.last_sample_harmonic_amplitude_l[harmonic_idx] = amp_l;
+                        self.engine.last_sample_harmonic_amplitude_r[harmonic_idx] = amp_r;
 
                         let saw_gain = 1.0 / (harmonic_idx as f32 + 1.0);
 
@@ -388,6 +404,14 @@ impl Plugin for AthenicDemodulator {
                         buf[1][sample_idx] += sample_r * self.envelope_values[sample_idx] * 0.5;
                     }
                 }
+            } else if self.engine.was_emitting {
+                self.engine.was_emitting = false;
+                self.engine.last_sample_harmonic_amplitude_l.fill(0.0);
+                self.engine.last_sample_harmonic_amplitude_r.fill(0.0);
+                self.engine.block_harmonic_amplitudes_l.fill(0.0);
+                self.engine.block_harmonic_amplitudes_r.fill(0.0);
+                self.engine.prev_block_harmonic_amplitudes_l.fill(0.0);
+                self.engine.prev_block_harmonic_amplitudes_r.fill(0.0);
             }
 
             if self.engine.playback_progress >= BLOCK_SIZE {
