@@ -24,6 +24,15 @@ struct AdditiveEngine {
     was_emitting: bool,
 }
 
+impl AdditiveEngine {
+    pub fn reset_phases(&mut self) {
+        // TODO: phase modes ?
+        for (i, phi) in self.harmonic_phases.iter_mut().enumerate() {
+            *phi = 512.0 / (i + 1) as f32;
+        }
+    }
+}
+
 impl Default for AdditiveEngine {
     fn default() -> Self {
         Self {
@@ -79,9 +88,12 @@ impl Default for AthenicDemodulator {
         let mut envelope_values = Vec::new();
         envelope_values.resize_with(4096, || 0.0);
 
+        let mut engine = AdditiveEngine::default();
+        engine.reset_phases();
+
         Self {
             params: Arc::new(AthenicDemodulatorParams::default()),
-            engine: AdditiveEngine::default(),
+            engine,
             sample_rate: 44100.0,
             notes_on: 0,
             current_midi_note: 0,
@@ -244,10 +256,6 @@ impl Plugin for AthenicDemodulator {
                                 self.engine.working_progress = 0;
                                 self.engine.prev_working_harmonic = 1;
 
-                                for (i, phi) in self.engine.harmonic_phases.iter_mut().enumerate() {
-                                    *phi = 512.0 / (i + 1) as f32;
-                                }
-
                                 self.notes_on += 1;
                                 self.current_midi_note = note;
                             }
@@ -406,6 +414,8 @@ impl Plugin for AthenicDemodulator {
                 }
             } else if self.engine.was_emitting {
                 self.engine.was_emitting = false;
+
+                self.engine.reset_phases();
                 self.engine.last_sample_harmonic_amplitude_l.fill(0.0);
                 self.engine.last_sample_harmonic_amplitude_r.fill(0.0);
                 self.engine.block_harmonic_amplitudes_l.fill(0.0);
