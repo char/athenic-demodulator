@@ -372,6 +372,15 @@ impl Plugin for AthenicDemodulator {
                         + (self.bend_amount.clamp(0.0, 1.0) * 2.0 - 1.0) * 12.0, // 12.0 = BEND_EXTENTS
                 );
 
+                // TODO: refactor for vectorizability
+                // 1. the nyquist frequency can be calculated in advance so that we know how many partials we need
+                // 2. rendered harmonics get sampled, amplitude calculation is applied.
+                //     this is hard to vectorize since the rendered harmonic count might not be an even multiple of anything.
+                //     might be worth batching all the amplitude calculation and then all the f32::sin() phase sampling
+                // 3. all harmonics get their phase stepped
+                //     the step is ALWAYS (fun * h) / sample_rate === (fun / sample_rate) * h
+                //     so we only need one multiplication in the inner loop to find the step for a harmonic
+
                 for harmonic_idx in 0..num_partials {
                     let frequency = fundamental * (1.0 + harmonic_idx as f32);
                     let step = frequency / self.sample_rate;
@@ -391,7 +400,7 @@ impl Plugin for AthenicDemodulator {
                             * (1.0 - playback_t)
                             + self.engine.block_harmonic_amplitudes_r[harmonic_idx] * playback_t;
 
-                        const SLEW_THRESHOLD: f32 = 1.0 / 3528.0;
+                        const SLEW_THRESHOLD: f32 = 1.0 / 3528.0; // TODO: this needs to depend on the sample rate :/
                         let last_amp_l = self.engine.last_sample_harmonic_amplitude_l[harmonic_idx];
                         let last_amp_r = self.engine.last_sample_harmonic_amplitude_r[harmonic_idx];
                         let delta_amp_l = amp_l - last_amp_l;
