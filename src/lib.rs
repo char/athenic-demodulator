@@ -1,5 +1,5 @@
 use nih_plug::prelude::*;
-use std::sync::Arc;
+use std::{env, sync::Arc};
 
 mod envelope;
 
@@ -372,55 +372,65 @@ impl Plugin for AthenicDemodulator {
                         + (self.bend_amount.clamp(0.0, 1.0) * 2.0 - 1.0) * 12.0, // 12.0 = BEND_EXTENTS
                 );
 
-                // TODO: refactor for vectorizability
-                // 1. the nyquist frequency can be calculated in advance so that we know how many partials we need
-                // 2. rendered harmonics get sampled, amplitude calculation is applied.
-                //     this is hard to vectorize since the rendered harmonic count might not be an even multiple of anything.
-                //     might be worth batching all the amplitude calculation and then all the f32::sin() phase sampling
-                // 3. all harmonics get their phase stepped
-                //     the step is ALWAYS (fun * h) / sample_rate === (fun / sample_rate) * h
-                //     so we only need one multiplication in the inner loop to find the step for a harmonic
+                // 1. calculate amplitude for all partials (with slew clamping for de-clicking)
+                // 2. the nyquist frequency can be calculated in advance so that we know how many partials we need
+                // 3. all harmonics get sampled & phase-stepped
 
-                for harmonic_idx in 0..num_partials {
-                    let frequency = fundamental * (1.0 + harmonic_idx as f32);
-                    let step = frequency / self.sample_rate;
+                let mut amplitudes_l: [f32; 512] = [0.0; 512];
+                let mut amplitudes_r: [f32; 512] = [0.0; 512];
 
-                    let phase = self.engine.harmonic_phases[harmonic_idx];
+                for i in 0..512 {
+                    let amp_l = self.engine.prev_block_harmonic_amplitudes_l[i]
+                        * (1.0 - playback_t)
+                        + self.engine.block_harmonic_amplitudes_l[i] * playback_t;
+                    let amp_r = self.engine.prev_block_harmonic_amplitudes_r[i]
+                        * (1.0 - playback_t)
+                        + self.engine.block_harmonic_amplitudes_r[i] * playback_t;
+                    let amp_slew_threshold = 12.5 / self.sample_rate;
+                    let last_amp_l = self.engine.last_sample_harmonic_amplitude_l[i];
+                    let last_amp_r = self.engine.last_sample_harmonic_amplitude_r[i];
+                    let delta_amp_l = amp_l - last_amp_l;
+                    let delta_amp_r = amp_r - last_amp_r;
+                    let amp_l =
+                        last_amp_l + delta_amp_l.clamp(-amp_slew_threshold, amp_slew_threshold);
+                    let amp_r =
+                        last_amp_r + delta_amp_r.clamp(-amp_slew_threshold, amp_slew_threshold);
+                    self.engine.last_sample_harmonic_amplitude_l[i] = amp_l;
+                    self.engine.last_sample_harmonic_amplitude_r[i] = amp_r;
 
-                    self.engine.harmonic_phases[harmonic_idx] = phase + step;
-
-                    if frequency < self.sample_rate / 2.0 {
-                        let (s, c) = f32::sin_cos(phase * std::f32::consts::TAU);
-
-                        // lerp gain over playback block
-                        let amp_l = self.engine.prev_block_harmonic_amplitudes_l[harmonic_idx]
-                            * (1.0 - playback_t)
-                            + self.engine.block_harmonic_amplitudes_l[harmonic_idx] * playback_t;
-                        let amp_r = self.engine.prev_block_harmonic_amplitudes_r[harmonic_idx]
-                            * (1.0 - playback_t)
-                            + self.engine.block_harmonic_amplitudes_r[harmonic_idx] * playback_t;
-
-                        const SLEW_THRESHOLD: f32 = 1.0 / 3528.0; // TODO: this needs to depend on the sample rate :/
-                        let last_amp_l = self.engine.last_sample_harmonic_amplitude_l[harmonic_idx];
-                        let last_amp_r = self.engine.last_sample_harmonic_amplitude_r[harmonic_idx];
-                        let delta_amp_l = amp_l - last_amp_l;
-                        let delta_amp_r = amp_r - last_amp_r;
-                        let amp_l = last_amp_l + delta_amp_l.clamp(-SLEW_THRESHOLD, SLEW_THRESHOLD);
-                        let amp_r = last_amp_r + delta_amp_r.clamp(-SLEW_THRESHOLD, SLEW_THRESHOLD);
-
-                        self.engine.last_sample_harmonic_amplitude_l[harmonic_idx] = amp_l;
-                        self.engine.last_sample_harmonic_amplitude_r[harmonic_idx] = amp_r;
-
-                        let saw_gain = 1.0 / (harmonic_idx as f32 + 1.0);
-
-                        let width = 0.0; // TODO
-                        let sample_l = (s + c * width) * amp_l * saw_gain.sqrt() * 2.0;
-                        let sample_r = (s - c * width) * amp_r * saw_gain.sqrt() * 2.0;
-
-                        buf[0][sample_idx] += sample_l * self.envelope_values[sample_idx] * 0.5;
-                        buf[1][sample_idx] += sample_r * self.envelope_values[sample_idx] * 0.5;
-                    }
+                    amplitudes_l[i] = amp_l;
+                    amplitudes_r[i] = amp_r;
                 }
+
+                let mut l = 0.0;
+                let mut r = 0.0;
+                let mut frequency = 0.0;
+
+                let nyquist = self.sample_rate / 2.0;
+                let nyquist_harmonic_idx = f32::ceil(nyquist / fundamental) as usize;
+
+                for (harmonic_idx, phase) in self.engine.harmonic_phases
+                    [0..num_partials.min(nyquist_harmonic_idx)]
+                    .iter_mut()
+                    .enumerate()
+                {
+                    frequency += fundamental;
+                    let step = frequency / self.sample_rate;
+                    *phase += step;
+                    let v = f32::sin(*phase * std::f32::consts::TAU);
+
+                    let saw_gain = 1.0 / (harmonic_idx as f32 + 1.0);
+                    let basic_gain = saw_gain.sqrt() * 2.0;
+                    let sample_l = v * basic_gain * amplitudes_l[harmonic_idx];
+                    let sample_r = v * basic_gain * amplitudes_r[harmonic_idx];
+
+                    l += sample_l;
+                    r += sample_r;
+                }
+
+                let envelope = self.envelope_values[sample_idx];
+                buf[0][sample_idx] = l * envelope * 0.5;
+                buf[1][sample_idx] = r * envelope * 0.5;
             } else if self.engine.was_emitting {
                 self.engine.was_emitting = false;
 
