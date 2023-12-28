@@ -65,6 +65,12 @@ struct AthenicDemodulator {
     envelope_values: Vec<f32>,
 }
 
+#[derive(Enum, PartialEq, Debug)]
+enum DistributionMode {
+    Exponential,
+    Linear,
+}
+
 #[derive(Params)]
 struct AthenicDemodulatorParams {
     #[id = "floor"]
@@ -81,6 +87,8 @@ struct AthenicDemodulatorParams {
     partial_count: IntParam,
     #[id = "partial_offset"]
     partial_offset: IntParam,
+    #[id = "distribution_mode"]
+    distribution_mode: EnumParam<DistributionMode>,
 }
 
 impl Default for AthenicDemodulator {
@@ -168,6 +176,7 @@ impl Default for AthenicDemodulatorParams {
                 0,
                 IntRange::Linear { min: 0, max: 512 },
             ),
+            distribution_mode: EnumParam::new("distribution mode", DistributionMode::Exponential),
         }
     }
 }
@@ -238,6 +247,7 @@ impl Plugin for AthenicDemodulator {
 
         let num_partials = self.params.partial_count.value() as usize;
         let partial_offset = self.params.partial_offset.value() as usize;
+        let distribution_mode = self.params.distribution_mode.value();
 
         for sample_idx in 0..num_samples {
             'events: loop {
@@ -283,11 +293,17 @@ impl Plugin for AthenicDemodulator {
 
             if self.engine.working_progress < BLOCK_SIZE {
                 // TODO: improve distribution
-                let next_harmonic: usize = f32::floor(f32::exp(
-                    f32::ln(num_partials as f32) * (self.engine.working_progress as f32)
-                        / BLOCK_SIZE as f32,
-                )) as usize
-                    + partial_offset;
+                let next_harmonic: usize = match distribution_mode {
+                    DistributionMode::Exponential => f32::floor(f32::exp(
+                        f32::ln(num_partials as f32) * (self.engine.working_progress as f32)
+                            / BLOCK_SIZE as f32,
+                    )) as usize,
+
+                    DistributionMode::Linear => f32::floor(
+                        (self.engine.working_progress as f32) * (num_partials as f32)
+                            / (BLOCK_SIZE as f32),
+                    ) as usize,
+                } + partial_offset;
 
                 let mut amplitude_l = buf[0][sample_idx];
                 amplitude_l += self.params.bias.value();
@@ -311,11 +327,13 @@ impl Plugin for AthenicDemodulator {
                     if harmonic >= 512 {
                         break;
                     }
+
+                    let l = amplitude_l * amplitude_l * amplitude_l.signum();
+                    let r = amplitude_r * amplitude_r * amplitude_r.signum();
+
                     if harmonic != self.engine.prev_working_harmonic {
-                        self.engine.working_harmonic_amplitudes_l[harmonic - 1] =
-                            amplitude_l * amplitude_l * amplitude_l.signum();
-                        self.engine.working_harmonic_amplitudes_r[harmonic - 1] =
-                            amplitude_r * amplitude_r * amplitude_r.signum();
+                        self.engine.working_harmonic_amplitudes_l[harmonic - 1] = l;
+                        self.engine.working_harmonic_amplitudes_r[harmonic - 1] = r;
                         self.engine.harmonic_sample_count = 1;
                     } else {
                         // moving average
@@ -323,12 +341,12 @@ impl Plugin for AthenicDemodulator {
                         self.engine.working_harmonic_amplitudes_l[harmonic - 1] =
                             (self.engine.working_harmonic_amplitudes_l[harmonic - 1]
                                 * (self.engine.harmonic_sample_count as f32 - 1.0)
-                                + amplitude_l * amplitude_l * amplitude_l.signum())
+                                + l)
                                 / (self.engine.harmonic_sample_count as f32);
                         self.engine.working_harmonic_amplitudes_r[harmonic - 1] =
                             (self.engine.working_harmonic_amplitudes_r[harmonic - 1]
                                 * (self.engine.harmonic_sample_count as f32 - 1.0)
-                                + amplitude_r * amplitude_r * amplitude_r.signum())
+                                + r)
                                 / (self.engine.harmonic_sample_count as f32);
                     }
 
@@ -408,9 +426,10 @@ impl Plugin for AthenicDemodulator {
 
                 let nyquist = self.sample_rate / 2.0;
                 let nyquist_harmonic_idx = f32::ceil(nyquist / fundamental) as usize;
+                let floor_harmonic_idx = f32::ceil(20.0 / fundamental) as usize;
 
                 for (harmonic_idx, phase) in self.engine.harmonic_phases
-                    [0..num_partials.min(nyquist_harmonic_idx)]
+                    [0.max(floor_harmonic_idx)..num_partials.min(nyquist_harmonic_idx)]
                     .iter_mut()
                     .enumerate()
                 {
@@ -441,6 +460,8 @@ impl Plugin for AthenicDemodulator {
                 self.engine.block_harmonic_amplitudes_r.fill(0.0);
                 self.engine.prev_block_harmonic_amplitudes_l.fill(0.0);
                 self.engine.prev_block_harmonic_amplitudes_r.fill(0.0);
+                self.engine.working_harmonic_amplitudes_l.fill(0.0);
+                self.engine.working_harmonic_amplitudes_r.fill(0.0);
             }
 
             if self.engine.playback_progress >= BLOCK_SIZE {
