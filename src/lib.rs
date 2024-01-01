@@ -323,7 +323,9 @@ impl Plugin for AthenicDemodulator {
                     amplitude_r = 0.0;
                 }
 
-                for harmonic in self.engine.prev_working_harmonic..=next_harmonic {
+                for harmonic in
+                    self.engine.prev_working_harmonic.max(partial_offset)..=next_harmonic
+                {
                     if harmonic >= 512 {
                         break;
                     }
@@ -372,6 +374,9 @@ impl Plugin for AthenicDemodulator {
                 self.engine
                     .block_harmonic_amplitudes_r
                     .copy_from_slice(&self.engine.working_harmonic_amplitudes_r);
+
+                self.engine.working_harmonic_amplitudes_l.fill(0.0);
+                self.engine.working_harmonic_amplitudes_r.fill(0.0);
 
                 self.engine.prev_working_harmonic = 1;
             }
@@ -460,8 +465,6 @@ impl Plugin for AthenicDemodulator {
                 self.engine.block_harmonic_amplitudes_r.fill(0.0);
                 self.engine.prev_block_harmonic_amplitudes_l.fill(0.0);
                 self.engine.prev_block_harmonic_amplitudes_r.fill(0.0);
-                self.engine.working_harmonic_amplitudes_l.fill(0.0);
-                self.engine.working_harmonic_amplitudes_r.fill(0.0);
             }
 
             if self.engine.playback_progress >= BLOCK_SIZE {
