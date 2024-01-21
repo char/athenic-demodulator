@@ -1,7 +1,10 @@
 use nih_plug::prelude::*;
 use std::{env, sync::Arc};
 
+mod additive_engine;
+mod demodulator;
 mod envelope;
+mod voice;
 
 use crate::envelope::AREnvelope;
 
