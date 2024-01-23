@@ -1,71 +1,18 @@
+use demodulator::{CVDemodulator, DEMOD_BLOCK_SIZE};
 use nih_plug::prelude::*;
 use std::{env, sync::Arc};
+use voice::AdditiveVoice;
 
 mod additive_engine;
 mod demodulator;
 mod envelope;
 mod voice;
 
-use crate::envelope::AREnvelope;
-
-const BLOCK_SIZE: usize = 1050; // 1050 samples = 42Hz wave period at 44.1k
-
-struct AdditiveEngine {
-    prev_working_harmonic: usize,
-    working_harmonic_amplitudes_l: [f32; 512],
-    working_harmonic_amplitudes_r: [f32; 512],
-    block_harmonic_amplitudes_l: [f32; 512],
-    block_harmonic_amplitudes_r: [f32; 512],
-    prev_block_harmonic_amplitudes_l: [f32; 512],
-    prev_block_harmonic_amplitudes_r: [f32; 512],
-    last_sample_harmonic_amplitude_l: [f32; 512],
-    last_sample_harmonic_amplitude_r: [f32; 512],
-    harmonic_phases: [f32; 512],
-    working_progress: usize,
-    playback_progress: usize,
-    harmonic_sample_count: usize,
-    was_emitting: bool,
-}
-
-impl AdditiveEngine {
-    pub fn reset_phases(&mut self) {
-        // TODO: phase modes ?
-        for (i, phi) in self.harmonic_phases.iter_mut().enumerate() {
-            *phi = 512.0 / (i + 1) as f32;
-        }
-    }
-}
-
-impl Default for AdditiveEngine {
-    fn default() -> Self {
-        Self {
-            prev_working_harmonic: 1,
-            working_harmonic_amplitudes_l: [0.0; 512],
-            working_harmonic_amplitudes_r: [0.0; 512],
-            block_harmonic_amplitudes_l: [0.0; 512],
-            block_harmonic_amplitudes_r: [0.0; 512],
-            prev_block_harmonic_amplitudes_l: [0.0; 512],
-            prev_block_harmonic_amplitudes_r: [0.0; 512],
-            last_sample_harmonic_amplitude_l: [0.0; 512],
-            last_sample_harmonic_amplitude_r: [0.0; 512],
-            harmonic_phases: [0.0; 512],
-            working_progress: 0,
-            playback_progress: 0,
-            harmonic_sample_count: 0,
-            was_emitting: false,
-        }
-    }
-}
-
-struct AthenicDemodulator {
+struct SynthPlugin {
     params: Arc<AthenicDemodulatorParams>,
-    engine: AdditiveEngine,
+    voice: AdditiveVoice,
+    demodulator: CVDemodulator,
     sample_rate: f32,
-    notes_on: usize,
-    current_midi_note: u8,
-    bend_amount: f32,
-    envelope: AREnvelope,
-    envelope_values: Vec<f32>,
 }
 
 #[derive(Enum, PartialEq, Debug)]
@@ -94,23 +41,16 @@ struct AthenicDemodulatorParams {
     distribution_mode: EnumParam<DistributionMode>,
 }
 
-impl Default for AthenicDemodulator {
+impl Default for SynthPlugin {
     fn default() -> Self {
         let mut envelope_values = Vec::new();
         envelope_values.resize_with(4096, || 0.0);
 
-        let mut engine = AdditiveEngine::default();
-        engine.reset_phases();
-
         Self {
             params: Arc::new(AthenicDemodulatorParams::default()),
-            engine,
+            voice: AdditiveVoice::default(),
+            demodulator: CVDemodulator::default(),
             sample_rate: 44100.0,
-            notes_on: 0,
-            current_midi_note: 0,
-            bend_amount: 0.5,
-            envelope: AREnvelope::default(),
-            envelope_values,
         }
     }
 }
@@ -184,7 +124,7 @@ impl Default for AthenicDemodulatorParams {
     }
 }
 
-impl Plugin for AthenicDemodulator {
+impl Plugin for SynthPlugin {
     const NAME: &'static str = "athenic demodulator";
     const VENDOR: &'static str = "charlotte athena som";
     const URL: &'static str = env!("CARGO_PKG_HOMEPAGE");
@@ -221,13 +161,13 @@ impl Plugin for AthenicDemodulator {
         context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
-        context.set_latency_samples(BLOCK_SIZE as u32);
+        context.set_latency_samples(DEMOD_BLOCK_SIZE as u32);
 
         true
     }
 
     fn reset(&mut self) {
-        self.envelope.reset();
+        self.voice.reset();
     }
 
     fn process(
@@ -237,253 +177,95 @@ impl Plugin for AthenicDemodulator {
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let num_samples = buffer.samples();
+
         let buf = buffer.as_slice();
+        let (buf_l, buf_r) = buf.split_at_mut(1);
+        let buf_l = &mut buf_l[0];
+        let buf_r = &mut buf_r[0];
 
-        let mut note_event = context.next_event();
-
-        self.envelope
+        self.voice
+            .envelope
             .set_attack_time(self.sample_rate, self.params.attack_ms.value());
-        self.envelope
+        self.voice
+            .envelope
             .set_release_time(self.sample_rate, self.params.release_ms.value());
-        self.envelope
-            .next_block(&mut self.envelope_values, num_samples);
 
         let num_partials = self.params.partial_count.value() as usize;
         let partial_offset = self.params.partial_offset.value() as usize;
         let distribution_mode = self.params.distribution_mode.value();
 
-        for sample_idx in 0..num_samples {
+        let cv_floor = self.params.floor.value();
+        let cv_ceil = self.params.ceiling.value();
+        let cv_bias = self.params.bias.value();
+
+        let mut note_event = context.next_event();
+        let mut block_start = 0;
+        let mut block_end = (block_start + 64).min(num_samples);
+
+        while block_start < num_samples {
             'events: loop {
                 match note_event {
-                    Some(event) if (event.timing() as usize) < sample_idx => {
-                        // if the event already passed, try the next one:
-                        note_event = context.next_event();
-                    }
-                    Some(event) if (event.timing() as usize) == sample_idx => {
-                        // if the event is for the current sample, we should process it:
+                    Some(event) if (event.timing() as usize) <= block_start => {
                         match event {
                             NoteEvent::NoteOn { note, .. } => {
-                                // TODO: polyphony???
-
-                                self.envelope.reset();
-                                self.engine.working_progress = 0;
-                                self.engine.prev_working_harmonic = 1;
-
-                                self.notes_on += 1;
-                                self.current_midi_note = note;
+                                self.voice.note_on(note);
+                                self.demodulator.reset();
                             }
                             NoteEvent::NoteOff { .. } => {
-                                self.notes_on = self.notes_on.saturating_sub(1);
-                                if self.notes_on == 0 {
-                                    self.envelope.start_release();
-                                }
+                                self.voice.note_off();
                             }
                             NoteEvent::MidiPitchBend { value, .. } => {
-                                self.bend_amount = value;
+                                self.voice.midi_pitch_bend(value);
                             }
                             _ => {}
                         }
 
-                        // then get the next one so we don't loop forever
                         note_event = context.next_event();
                     }
-                    _ => {
-                        // if the event is after the current sample, just hold on to it:
+                    Some(event) if (event.timing() as usize) < block_end => {
+                        block_end = event.timing() as usize;
                         break 'events;
                     }
+                    _ => break 'events,
                 }
             }
 
-            if self.engine.working_progress < BLOCK_SIZE {
-                // TODO: improve distribution
-                let next_harmonic: usize = match distribution_mode {
-                    DistributionMode::Exponential => f32::floor(f32::exp(
-                        f32::ln(num_partials as f32) * (self.engine.working_progress as f32)
-                            / BLOCK_SIZE as f32,
-                    )) as usize,
-
-                    DistributionMode::Linear => f32::floor(
-                        (self.engine.working_progress as f32) * (num_partials as f32)
-                            / (BLOCK_SIZE as f32),
-                    ) as usize,
-                } + partial_offset;
-
-                let mut amplitude_l = buf[0][sample_idx];
-                amplitude_l += self.params.bias.value();
-                if amplitude_l > self.params.ceiling.value() {
-                    amplitude_l = 0.0;
-                }
-                if amplitude_l < self.params.floor.value() {
-                    amplitude_l = 0.0;
-                }
-
-                let mut amplitude_r = buf[1][sample_idx];
-                amplitude_r += self.params.bias.value();
-                if amplitude_r > self.params.ceiling.value() {
-                    amplitude_r = 0.0;
-                }
-                if amplitude_r < self.params.floor.value() {
-                    amplitude_r = 0.0;
-                }
-
-                for harmonic in
-                    self.engine.prev_working_harmonic.max(partial_offset)..=next_harmonic
-                {
-                    if harmonic >= 512 {
-                        break;
-                    }
-
-                    let l = amplitude_l * amplitude_l * amplitude_l.signum();
-                    let r = amplitude_r * amplitude_r * amplitude_r.signum();
-
-                    if harmonic != self.engine.prev_working_harmonic {
-                        self.engine.working_harmonic_amplitudes_l[harmonic - 1] = l;
-                        self.engine.working_harmonic_amplitudes_r[harmonic - 1] = r;
-                        self.engine.harmonic_sample_count = 1;
-                    } else {
-                        // moving average
-                        self.engine.harmonic_sample_count += 1;
-                        self.engine.working_harmonic_amplitudes_l[harmonic - 1] =
-                            (self.engine.working_harmonic_amplitudes_l[harmonic - 1]
-                                * (self.engine.harmonic_sample_count as f32 - 1.0)
-                                + l)
-                                / (self.engine.harmonic_sample_count as f32);
-                        self.engine.working_harmonic_amplitudes_r[harmonic - 1] =
-                            (self.engine.working_harmonic_amplitudes_r[harmonic - 1]
-                                * (self.engine.harmonic_sample_count as f32 - 1.0)
-                                + r)
-                                / (self.engine.harmonic_sample_count as f32);
-                    }
-
-                    self.engine.prev_working_harmonic = harmonic;
-                }
+            let amps = self.demodulator.submit_samples(
+                &buf_l[block_start..block_end],
+                &buf_r[block_start..block_end],
+                &distribution_mode,
+                num_partials,
+                partial_offset,
+                cv_floor,
+                cv_ceil,
+                cv_bias,
+            );
+            if let Some((amp_l, amp_r)) = amps {
+                self.voice.engine.submit_amplitudes(&amp_l, &amp_r);
             }
 
-            self.engine.working_progress += 1;
+            buf_l[block_start..block_end].fill(0.0);
+            buf_r[block_start..block_end].fill(0.0);
 
-            if self.engine.working_progress >= BLOCK_SIZE {
-                self.engine.working_progress = 0;
+            self.voice.process(
+                self.sample_rate,
+                &mut buf_l[block_start..block_end],
+                &mut buf_r[block_start..block_end],
+            );
 
-                self.engine
-                    .prev_block_harmonic_amplitudes_l
-                    .copy_from_slice(&self.engine.block_harmonic_amplitudes_l);
-                self.engine
-                    .prev_block_harmonic_amplitudes_r
-                    .copy_from_slice(&self.engine.block_harmonic_amplitudes_r);
-
-                self.engine
-                    .block_harmonic_amplitudes_l
-                    .copy_from_slice(&self.engine.working_harmonic_amplitudes_l);
-                self.engine
-                    .block_harmonic_amplitudes_r
-                    .copy_from_slice(&self.engine.working_harmonic_amplitudes_r);
-
-                self.engine.working_harmonic_amplitudes_l.fill(0.0);
-                self.engine.working_harmonic_amplitudes_r.fill(0.0);
-
-                self.engine.prev_working_harmonic = 1;
-            }
-
-            buf[0][sample_idx] = 0.0;
-            buf[1][sample_idx] = 0.0;
-
-            self.engine.playback_progress += 1;
-            let playback_t = self.engine.playback_progress as f32 / BLOCK_SIZE as f32;
-
-            if self.notes_on > 0 || self.envelope.is_releasing() {
-                self.engine.was_emitting = true;
-
-                let fundamental = util::f32_midi_note_to_freq(
-                    self.current_midi_note as f32
-                        + (self.bend_amount.clamp(0.0, 1.0) * 2.0 - 1.0) * 12.0, // 12.0 = BEND_EXTENTS
-                );
-
-                // 1. calculate amplitude for all partials (with slew clamping for de-clicking)
-                // 2. the nyquist frequency can be calculated in advance so that we know how many partials we need
-                // 3. all harmonics get sampled & phase-stepped
-
-                let mut amplitudes_l: [f32; 512] = [0.0; 512];
-                let mut amplitudes_r: [f32; 512] = [0.0; 512];
-
-                for i in 0..512 {
-                    let amp_l = self.engine.prev_block_harmonic_amplitudes_l[i]
-                        * (1.0 - playback_t)
-                        + self.engine.block_harmonic_amplitudes_l[i] * playback_t;
-                    let amp_r = self.engine.prev_block_harmonic_amplitudes_r[i]
-                        * (1.0 - playback_t)
-                        + self.engine.block_harmonic_amplitudes_r[i] * playback_t;
-                    let amp_slew_threshold = 12.5 / self.sample_rate;
-                    let last_amp_l = self.engine.last_sample_harmonic_amplitude_l[i];
-                    let last_amp_r = self.engine.last_sample_harmonic_amplitude_r[i];
-                    let delta_amp_l = amp_l - last_amp_l;
-                    let delta_amp_r = amp_r - last_amp_r;
-                    let amp_l =
-                        last_amp_l + delta_amp_l.clamp(-amp_slew_threshold, amp_slew_threshold);
-                    let amp_r =
-                        last_amp_r + delta_amp_r.clamp(-amp_slew_threshold, amp_slew_threshold);
-                    self.engine.last_sample_harmonic_amplitude_l[i] = amp_l;
-                    self.engine.last_sample_harmonic_amplitude_r[i] = amp_r;
-
-                    amplitudes_l[i] = amp_l;
-                    amplitudes_r[i] = amp_r;
-                }
-
-                let mut l = 0.0;
-                let mut r = 0.0;
-                let mut frequency = 0.0;
-
-                let nyquist = self.sample_rate / 2.0;
-                let nyquist_harmonic_idx = f32::ceil(nyquist / fundamental) as usize;
-                let floor_harmonic_idx = f32::ceil(20.0 / fundamental) as usize;
-
-                for (harmonic_idx, phase) in self.engine.harmonic_phases
-                    [0.max(floor_harmonic_idx)..num_partials.min(nyquist_harmonic_idx)]
-                    .iter_mut()
-                    .enumerate()
-                {
-                    frequency += fundamental;
-                    let step = frequency / self.sample_rate;
-                    *phase += step;
-                    let v = f32::sin(*phase * std::f32::consts::TAU);
-
-                    let saw_gain = 1.0 / (harmonic_idx as f32 + 1.0);
-                    let basic_gain = saw_gain.sqrt() * 2.0;
-                    let sample_l = v * basic_gain * amplitudes_l[harmonic_idx];
-                    let sample_r = v * basic_gain * amplitudes_r[harmonic_idx];
-
-                    l += sample_l;
-                    r += sample_r;
-                }
-
-                let envelope = self.envelope_values[sample_idx];
-                buf[0][sample_idx] = l * envelope * 0.5;
-                buf[1][sample_idx] = r * envelope * 0.5;
-            } else if self.engine.was_emitting {
-                self.engine.was_emitting = false;
-
-                self.engine.reset_phases();
-                self.engine.last_sample_harmonic_amplitude_l.fill(0.0);
-                self.engine.last_sample_harmonic_amplitude_r.fill(0.0);
-                self.engine.block_harmonic_amplitudes_l.fill(0.0);
-                self.engine.block_harmonic_amplitudes_r.fill(0.0);
-                self.engine.prev_block_harmonic_amplitudes_l.fill(0.0);
-                self.engine.prev_block_harmonic_amplitudes_r.fill(0.0);
-            }
-
-            if self.engine.playback_progress >= BLOCK_SIZE {
-                self.engine.playback_progress = 0;
-            }
+            block_start = block_end;
+            block_end = (block_start + 64).min(num_samples);
         }
 
         ProcessStatus::Normal
     }
 }
 
-impl Vst3Plugin for AthenicDemodulator {
+impl Vst3Plugin for SynthPlugin {
     const VST3_CLASS_ID: [u8; 16] = *b"CharAddDemod\0\0\0\0";
 
     const VST3_SUBCATEGORIES: &'static [Vst3SubCategory] =
         &[Vst3SubCategory::Fx, Vst3SubCategory::Synth];
 }
 
-nih_export_vst3!(AthenicDemodulator);
+nih_export_vst3!(SynthPlugin);
