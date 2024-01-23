@@ -70,10 +70,6 @@ impl AdditiveVoice {
             out_r.len(),
             "channel output buffers must match length"
         );
-        assert!(
-            out_l.len() % 32 == 0,
-            "channel output buffer size must be multiple of 32"
-        );
 
         let note = self.current_midi_note as f64
             + (self.bend_value.clamp(0.0, 1.0) * 2.0 - 1.0) as f64 * BEND_RANGE;

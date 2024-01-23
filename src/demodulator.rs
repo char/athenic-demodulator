@@ -80,13 +80,14 @@ impl CVDemodulator {
                     (harmonic_count as f32) * (self.progress as f32) / (DEMOD_BLOCK_SIZE as f32),
                 ) as usize,
             } + harmonic_offset;
-            let next_harmonic = next_harmonic.min(MAX_HARMONICS);
 
-            for harmonic in self.prev_harmonic.max(harmonic_offset)..=next_harmonic {
+            for harmonic in
+                self.prev_harmonic.max(harmonic_offset).max(1)..=next_harmonic.min(MAX_HARMONICS)
+            {
                 let l = l * l * l.signum();
                 let r = r * r * r.signum();
 
-                /* if harmonic != self.prev_harmonic {
+                if harmonic != self.prev_harmonic {
                     self.sample_count = 0;
                     self.working_amp_l[harmonic - 1] = l;
                     self.working_amp_r[harmonic - 1] = r;
@@ -99,9 +100,7 @@ impl CVDemodulator {
                     self.working_amp_r[harmonic - 1] =
                         (self.working_amp_r[harmonic - 1] * (self.sample_count as f32) + r)
                             / (self.sample_count as f32);
-                } */
-                self.working_amp_l[harmonic - 1] = l;
-                self.working_amp_r[harmonic - 1] = r;
+                }
 
                 self.prev_harmonic = harmonic;
             }

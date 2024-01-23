@@ -9,7 +9,7 @@ mod envelope;
 mod voice;
 
 struct SynthPlugin {
-    params: Arc<AthenicDemodulatorParams>,
+    params: Arc<SynthParams>,
     voice: AdditiveVoice,
     demodulator: CVDemodulator,
     sample_rate: f32,
@@ -22,7 +22,7 @@ enum DistributionMode {
 }
 
 #[derive(Params)]
-struct AthenicDemodulatorParams {
+struct SynthParams {
     #[id = "floor"]
     floor: FloatParam,
     #[id = "ceiling"]
@@ -47,7 +47,7 @@ impl Default for SynthPlugin {
         envelope_values.resize_with(4096, || 0.0);
 
         Self {
-            params: Arc::new(AthenicDemodulatorParams::default()),
+            params: Arc::new(SynthParams::default()),
             voice: AdditiveVoice::default(),
             demodulator: CVDemodulator::default(),
             sample_rate: 44100.0,
@@ -55,7 +55,7 @@ impl Default for SynthPlugin {
     }
 }
 
-impl Default for AthenicDemodulatorParams {
+impl Default for SynthParams {
     fn default() -> Self {
         Self {
             floor: FloatParam::new(
