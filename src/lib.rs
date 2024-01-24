@@ -47,6 +47,8 @@ struct SynthParams {
     distribution_mode: EnumParam<DistributionMode>,
     #[id = "basic_gain_mode"]
     basic_gain_mode: EnumParam<BasicGainMode>,
+    #[id = "slew_limiting"]
+    slew_limiting: BoolParam,
 }
 
 impl Default for SynthPlugin {
@@ -129,6 +131,7 @@ impl Default for SynthParams {
             ),
             distribution_mode: EnumParam::new("distribution mode", DistributionMode::Exponential),
             basic_gain_mode: EnumParam::new("basic gain mode", BasicGainMode::Sawtooth),
+            slew_limiting: BoolParam::new("slew limiting", true),
         }
     }
 }
@@ -207,6 +210,7 @@ impl Plugin for SynthPlugin {
         let cv_floor = self.params.floor.value();
         let cv_ceil = self.params.ceiling.value();
         let cv_bias = self.params.bias.value();
+        let slew_limiting = self.params.slew_limiting.value();
 
         let mut note_event = context.next_event();
         let mut block_start = 0;
@@ -262,6 +266,7 @@ impl Plugin for SynthPlugin {
                 &mut buf_l[block_start..block_end],
                 &mut buf_r[block_start..block_end],
                 &basic_gain_mode,
+                slew_limiting,
             );
 
             block_start = block_end;

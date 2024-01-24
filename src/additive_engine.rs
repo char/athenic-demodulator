@@ -41,6 +41,7 @@ impl AdditiveEngine {
         out_l: &mut [f32],
         out_r: &mut [f32],
         basic_gain_mode: &BasicGainMode,
+        slew_limiting: bool,
     ) {
         assert_eq!(
             out_l.len(),
@@ -67,15 +68,19 @@ impl AdditiveEngine {
                 if freq >= 20.0 && freq <= sr_f64 / 2.0 {
                     let v = f64::sin(*phase * std::f64::consts::TAU);
 
-                    let slew_threshold = 12.5 / sample_rate;
-                    let amp_l = self.amp_l[i];
-                    let amp_r = self.amp_r[i];
-                    let last_amp_l = self.last_amp_l[i];
-                    let last_amp_r = self.last_amp_r[i];
-                    let delta_amp_l = amp_l - last_amp_l;
-                    let delta_amp_r = amp_r - last_amp_r;
-                    let amp_l = last_amp_l + delta_amp_l.clamp(-slew_threshold, slew_threshold);
-                    let amp_r = last_amp_r + delta_amp_r.clamp(-slew_threshold, slew_threshold);
+                    let mut amp_l = self.amp_l[i];
+                    let mut amp_r = self.amp_r[i];
+
+                    if slew_limiting {
+                        let slew_threshold = 12.5 / sample_rate;
+                        let last_amp_l = self.last_amp_l[i];
+                        let last_amp_r = self.last_amp_r[i];
+                        let delta_amp_l = amp_l - last_amp_l;
+                        let delta_amp_r = amp_r - last_amp_r;
+                        amp_l = last_amp_l + delta_amp_l.clamp(-slew_threshold, slew_threshold);
+                        amp_r = last_amp_r + delta_amp_r.clamp(-slew_threshold, slew_threshold);
+                    }
+
                     self.last_amp_l[i] = amp_l;
                     self.last_amp_r[i] = amp_r;
 

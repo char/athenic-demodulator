@@ -67,6 +67,7 @@ impl AdditiveVoice {
         out_l: &mut [f32],
         out_r: &mut [f32],
         basic_gain_mode: &BasicGainMode,
+        slew_limiting: bool,
     ) {
         if !(self.notes_on > 0 || self.envelope.is_releasing()) {
             return;
@@ -98,8 +99,14 @@ impl AdditiveVoice {
             let buf_r = &mut buf_r[0..block_len];
 
             self.envelope.next_block(envelope_values, block_len);
-            self.engine
-                .generate_samples(&i_freqs, sample_rate, buf_l, buf_r, basic_gain_mode);
+            self.engine.generate_samples(
+                &i_freqs,
+                sample_rate,
+                buf_l,
+                buf_r,
+                basic_gain_mode,
+                slew_limiting,
+            );
 
             for smp in 0..block_len {
                 out_l[i + smp] += buf_l[smp] * envelope_values[smp];
