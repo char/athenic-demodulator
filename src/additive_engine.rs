@@ -1,3 +1,5 @@
+use crate::BasicGainMode;
+
 pub const MAX_HARMONICS: usize = 512;
 
 pub struct AdditiveEngine {
@@ -38,6 +40,7 @@ impl AdditiveEngine {
         sample_rate: f32,
         out_l: &mut [f32],
         out_r: &mut [f32],
+        basic_gain_mode: &BasicGainMode,
     ) {
         assert_eq!(
             out_l.len(),
@@ -76,8 +79,10 @@ impl AdditiveEngine {
                     self.last_amp_l[i] = amp_l;
                     self.last_amp_r[i] = amp_r;
 
-                    let basic_gain = 1.0 / (i as f32 + 1.0);
-                    let basic_gain = basic_gain.sqrt();
+                    let basic_gain = match basic_gain_mode {
+                        BasicGainMode::Flat => 1.0,
+                        BasicGainMode::Sawtooth => (1.0 / (i as f32 + 1.0)).sqrt(),
+                    };
 
                     samp_l += v as f32 * amp_l * basic_gain;
                     samp_r += v as f32 * amp_r * basic_gain;

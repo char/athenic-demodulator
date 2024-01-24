@@ -16,9 +16,15 @@ struct SynthPlugin {
 }
 
 #[derive(Enum, PartialEq, Debug)]
-enum DistributionMode {
+pub enum DistributionMode {
     Exponential,
     Linear,
+}
+
+#[derive(Enum, PartialEq, Debug)]
+pub enum BasicGainMode {
+    Sawtooth,
+    Flat,
 }
 
 #[derive(Params)]
@@ -39,6 +45,8 @@ struct SynthParams {
     partial_offset: IntParam,
     #[id = "distribution_mode"]
     distribution_mode: EnumParam<DistributionMode>,
+    #[id = "basic_gain_mode"]
+    basic_gain_mode: EnumParam<BasicGainMode>,
 }
 
 impl Default for SynthPlugin {
@@ -120,6 +128,7 @@ impl Default for SynthParams {
                 IntRange::Linear { min: 0, max: 512 },
             ),
             distribution_mode: EnumParam::new("distribution mode", DistributionMode::Exponential),
+            basic_gain_mode: EnumParam::new("basic gain mode", BasicGainMode::Sawtooth),
         }
     }
 }
@@ -193,6 +202,7 @@ impl Plugin for SynthPlugin {
         let num_partials = self.params.partial_count.value() as usize;
         let partial_offset = self.params.partial_offset.value() as usize;
         let distribution_mode = self.params.distribution_mode.value();
+        let basic_gain_mode = self.params.basic_gain_mode.value();
 
         let cv_floor = self.params.floor.value();
         let cv_ceil = self.params.ceiling.value();
@@ -251,6 +261,7 @@ impl Plugin for SynthPlugin {
                 self.sample_rate,
                 &mut buf_l[block_start..block_end],
                 &mut buf_r[block_start..block_end],
+                &basic_gain_mode,
             );
 
             block_start = block_end;
